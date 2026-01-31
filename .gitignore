@@ -1,0 +1,30 @@
+# Build directories
+build/
+_build/
+
+# Binaries
+livespiffd
+*.exe
+*.out
+
+# Object files
+*.o
+*.lo
+*.la
+
+# Meson
+meson-private/
+meson-logs/
+meson-info/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+
+# Runtime data (never commit user data)
+*.log
