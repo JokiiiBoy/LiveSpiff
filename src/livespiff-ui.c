@@ -32,6 +32,13 @@ typedef struct {
   LiveSpiffUiSettings settings;
 } Ui;
 
+typedef struct {
+  Ui *ui;
+  GtkWindow *dlg;
+  GtkListBox *list;
+  GtkLabel *status;
+} WindowPickerCtx;
+
 /* ---------------- util ---------------- */
 
 static char* str_trim(char *s) {
@@ -62,7 +69,6 @@ static gboolean run_cmd_capture(const char *cmdline, char **out_stdout) {
     return FALSE;
   }
 
-  // status is shell exit status
   if (status != 0) {
     g_free(stdout_str);
     g_free(stderr_str);
@@ -139,7 +145,7 @@ static void ls_call_void(Ui *ui, const char *method) {
   if (err) g_error_free(err);
 }
 
-/* ---------------- selected game label ---------------- */
+/* ---------------- selected window label ---------------- */
 
 static void update_picked_label(Ui *ui) {
   if (!ui->picked_label) return;
@@ -156,20 +162,63 @@ static void update_picked_label(Ui *ui) {
   }
 }
 
-/* ---------------- window list via kdotool ---------------- */
+/* ---------------- timer tick ---------------- */
 
-typedef struct {
-  Ui *ui;
-  GtkWindow *dlg;
-  GtkListBox *list;
-  GtkLabel *status;
-} WindowPickerCtx;
+static gboolean ui_tick(gpointer user_data) {
+  Ui *ui = (Ui*)user_data;
+
+  if (!ui->proxy_ls) {
+    gtk_label_set_text(ui->state_label, "Daemon not running");
+    gtk_label_set_text(ui->time_label, "--:--:--.---");
+    gtk_label_set_text(ui->split_label, "Split: - / -");
+    return G_SOURCE_CONTINUE;
+  }
+
+  gint64 ms = 0;
+  if (ls_call_i64(ui, "ElapsedMs", &ms)) {
+    char *t = format_time_ms(ms);
+    gtk_label_set_text(ui->time_label, t);
+    g_free(t);
+  } else {
+    gtk_label_set_text(ui->time_label, "--:--:--.---");
+  }
+
+  char *state = NULL;
+  if (ls_call_str(ui, "State", &state)) {
+    gtk_label_set_text(ui->state_label, state);
+    g_free(state);
+  } else {
+    gtk_label_set_text(ui->state_label, "Unknown");
+  }
+
+  gint32 cur = 0, count = 0;
+  if (ls_call_i32(ui, "CurrentSplit", &cur) && ls_call_i32(ui, "SplitCount", &count)) {
+    char *s = g_strdup_printf("Split: %d / %d", (int)(cur + 1), (int)count);
+    gtk_label_set_text(ui->split_label, s);
+    g_free(s);
+  } else {
+    gtk_label_set_text(ui->split_label, "Split: - / -");
+  }
+
+  return G_SOURCE_CONTINUE;
+}
+
+static void restart_tick(Ui *ui) {
+  if (ui->tick_id) { g_source_remove(ui->tick_id); ui->tick_id = 0; }
+  ui->tick_id = g_timeout_add((guint)ui->settings.refresh_ms, ui_tick, ui);
+}
+
+/* ---------------- window picker ---------------- */
+
+static void picker_refresh(WindowPickerCtx *ctx);
+
+static void on_picker_refresh_clicked(GtkButton *btn, gpointer user_data) {
+  (void)btn;
+  WindowPickerCtx *ctx = (WindowPickerCtx*)user_data;
+  picker_refresh(ctx);
+}
 
 static void pick_apply(WindowPickerCtx *ctx, const char *wid) {
-  // Fetch details using kdotool:
-  // kdotool getwindowname <id>
-  // kdotool getwindowclassname <id>
-  // kdotool getwindowpid <id>
   char *out = NULL;
 
   char *cmd_class = g_strdup_printf("kdotool getwindowclassname %s", wid);
@@ -185,7 +234,6 @@ static void pick_apply(WindowPickerCtx *ctx, const char *wid) {
 
   g_free(cmd_class); g_free(cmd_name); g_free(cmd_pid);
 
-  // Save into settings
   ui_settings_free_fields(&ctx->ui->settings);
   ctx->ui->settings.picked_window_id = g_strdup(wid);
   ctx->ui->settings.picked_classname = classname ? classname : g_strdup("");
@@ -201,20 +249,21 @@ static void pick_apply(WindowPickerCtx *ctx, const char *wid) {
 static void picker_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer user_data) {
   (void)box;
   WindowPickerCtx *ctx = (WindowPickerCtx*)user_data;
-  const char *wid = g_object_get_data(G_OBJECT(row), "wid");
+  const char *wid = (const char*)g_object_get_data(G_OBJECT(row), "wid");
   if (wid && wid[0]) pick_apply(ctx, wid);
 }
 
-static void picker_refresh(WindowPickerCtx *ctx) {
-  // Clear list
+static void picker_clear_list(WindowPickerCtx *ctx) {
   GtkWidget *child;
   while ((child = gtk_widget_get_first_child(GTK_WIDGET(ctx->list))) != NULL) {
     gtk_list_box_remove(ctx->list, child);
   }
+}
 
+static void picker_refresh(WindowPickerCtx *ctx) {
+  picker_clear_list(ctx);
   gtk_label_set_text(ctx->status, "Loading windows...");
 
-  // List windows: kdotool search ""
   char *out = NULL;
   if (!run_cmd_capture("kdotool search \"\"", &out)) {
     gtk_label_set_text(ctx->status, "Failed to run kdotool. Is it installed?");
@@ -229,7 +278,7 @@ static void picker_refresh(WindowPickerCtx *ctx) {
     char *wid = str_trim(lines[i]);
     if (!wid || !wid[0]) continue;
 
-    // Display text: classname — title (best effort; we can fetch lazily but keep it simple)
+    // fetch classname & title for display
     char *tmp = NULL;
     char *cmd_class = g_strdup_printf("kdotool getwindowclassname %s", wid);
     char *cmd_name  = g_strdup_printf("kdotool getwindowname %s", wid);
@@ -253,7 +302,6 @@ static void picker_refresh(WindowPickerCtx *ctx) {
     gtk_label_set_wrap(GTK_LABEL(lb), TRUE);
     gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), lb);
 
-    // attach window id
     g_object_set_data_full(G_OBJECT(row), "wid", g_strdup(wid), g_free);
 
     gtk_list_box_append(ctx->list, row);
@@ -267,14 +315,13 @@ static void picker_refresh(WindowPickerCtx *ctx) {
   g_strfreev(lines);
 
   if (count == 0) gtk_label_set_text(ctx->status, "No windows found.");
-  else gtk_label_set_text(ctx->status, "Click a window to select it.");
+  else gtk_label_set_text(ctx->status, "Double-click a window to select it.");
 }
 
 static void on_select_window_clicked(GtkButton *btn, gpointer user_data) {
   (void)btn;
   Ui *ui = (Ui*)user_data;
 
-  // Create modal picker window
   GtkWindow *dlg = GTK_WINDOW(gtk_window_new());
   gtk_window_set_title(dlg, "Select window");
   gtk_window_set_transient_for(dlg, ui->win);
@@ -316,77 +363,15 @@ static void on_select_window_clicked(GtkButton *btn, gpointer user_data) {
   ctx->status = GTK_LABEL(status);
 
   g_signal_connect(list, "row-activated", G_CALLBACK(picker_row_activated), ctx);
-
+  g_signal_connect(refresh, "clicked", G_CALLBACK(on_picker_refresh_clicked), ctx);
   g_signal_connect_swapped(close, "clicked", G_CALLBACK(gtk_window_destroy), dlg);
 
-  g_signal_connect(refresh, "clicked", G_CALLBACK(+[](GtkButton *b, gpointer data){
-    (void)b;
-    WindowPickerCtx *ctx = (WindowPickerCtx*)data;
-    picker_refresh(ctx);
-  }), ctx);
-
-  // NOTE: the lambda above is not valid in C. Replace it with a normal function.
-  // We'll avoid lambdas by manually refreshing once and not wiring refresh to lambda in C.
-  // So: disconnect and do a simple approach below.
-
-  // Remove the invalid lambda connection by not using it.
-  // Instead, connect refresh to a small helper via g_signal_connect_data:
-  g_signal_handlers_disconnect_by_func(refresh, (gpointer)0, ctx); // no-op safety
-
-  // Proper C callback:
-  g_signal_connect_data(refresh, "clicked",
-    G_CALLBACK(+[](GtkButton *b, gpointer data){ (void)b; picker_refresh((WindowPickerCtx*)data); }),
-    ctx, (GClosureNotify)g_free, (GConnectFlags)0);
-
-  // The above is still a lambda. Let's do the real C way:
-  // We'll just refresh immediately and keep "Refresh" button disabled if you want to keep it simple.
-  // To keep it 100% C, disable refresh and instruct user to reopen dialog.
-  gtk_widget_set_sensitive(refresh, FALSE);
-  gtk_button_set_label(GTK_BUTTON(refresh), "Refresh (reopen dialog)");
+  // Free ctx when dialog is destroyed
+  g_signal_connect_data(dlg, "destroy", G_CALLBACK(g_free), ctx, NULL, 0);
 
   picker_refresh(ctx);
 
   gtk_window_present(dlg);
-}
-
-/* ---------------- UI tick ---------------- */
-
-static gboolean ui_tick(gpointer user_data) {
-  Ui *ui = (Ui*)user_data;
-
-  if (!ui->proxy_ls) {
-    gtk_label_set_text(ui->state_label, "Daemon not running");
-    gtk_label_set_text(ui->time_label, "--:--:--.---");
-    gtk_label_set_text(ui->split_label, "Split: - / -");
-    return G_SOURCE_CONTINUE;
-  }
-
-  gint64 ms = 0;
-  if (ls_call_i64(ui, "ElapsedMs", &ms)) {
-    char *t = format_time_ms(ms);
-    gtk_label_set_text(ui->time_label, t);
-    g_free(t);
-  }
-
-  char *state = NULL;
-  if (ls_call_str(ui, "State", &state)) {
-    gtk_label_set_text(ui->state_label, state);
-    g_free(state);
-  }
-
-  gint32 cur = 0, count = 0;
-  if (ls_call_i32(ui, "CurrentSplit", &cur) && ls_call_i32(ui, "SplitCount", &count)) {
-    char *s = g_strdup_printf("Split: %d / %d", (int)(cur + 1), (int)count);
-    gtk_label_set_text(ui->split_label, s);
-    g_free(s);
-  }
-
-  return G_SOURCE_CONTINUE;
-}
-
-static void restart_tick(Ui *ui) {
-  if (ui->tick_id) { g_source_remove(ui->tick_id); ui->tick_id = 0; }
-  ui->tick_id = g_timeout_add((guint)ui->settings.refresh_ms, ui_tick, ui);
 }
 
 /* ---------------- settings window ---------------- */
@@ -427,9 +412,11 @@ static void on_settings_clicked(GtkButton *btn, gpointer user_data) {
   gtk_label_set_xalign(GTK_LABEL(picked), 0.0f);
   gtk_box_append(GTK_BOX(box), picked);
 
-  // Bind this label temporarily
+  // show current selection
+  GtkLabel *old = ui->picked_label;
   ui->picked_label = GTK_LABEL(picked);
   update_picked_label(ui);
+  ui->picked_label = old;
 
   GtkWidget *lbl = gtk_label_new("Refresh interval (ms)");
   gtk_label_set_xalign(GTK_LABEL(lbl), 0.0f);
@@ -452,6 +439,10 @@ static void on_settings_clicked(GtkButton *btn, gpointer user_data) {
 }
 
 /* ---------------- main window build ---------------- */
+
+static void on_start_split_clicked(GtkButton *btn, gpointer user_data) { (void)btn; ls_call_void((Ui*)user_data, "StartOrSplit"); }
+static void on_pause_clicked(GtkButton *btn, gpointer user_data) { (void)btn; ls_call_void((Ui*)user_data, "TogglePause"); }
+static void on_reset_clicked(GtkButton *btn, gpointer user_data) { (void)btn; ls_call_void((Ui*)user_data, "Reset"); }
 
 static void ui_build(Ui *ui) {
   ui->win = GTK_WINDOW(gtk_application_window_new(ui->app));
@@ -511,13 +502,10 @@ static void ui_build(Ui *ui) {
   ui->btn_pause       = GTK_BUTTON(gtk_button_new_with_label("Pause / Resume"));
   ui->btn_reset       = GTK_BUTTON(gtk_button_new_with_label("Reset"));
 
-  g_signal_connect(ui->btn_settings,    "clicked", G_CALLBACK(on_settings_clicked), ui);
-  g_signal_connect(ui->btn_start_split, "clicked", G_CALLBACK(+[](GtkButton *b, gpointer d){ (void)b; ls_call_void((Ui*)d, "StartOrSplit"); }), ui);
-  g_signal_connect(ui->btn_pause,       "clicked", G_CALLBACK(+[](GtkButton *b, gpointer d){ (void)b; ls_call_void((Ui*)d, "TogglePause"); }), ui);
-  g_signal_connect(ui->btn_reset,       "clicked", G_CALLBACK(+[](GtkButton *b, gpointer d){ (void)b; ls_call_void((Ui*)d, "Reset"); }), ui);
-
-  // NOTE: lambdas are not valid in C; we will avoid them by connecting to small wrappers below.
-  // To keep file 100% C, we do normal callbacks:
+  g_signal_connect(ui->btn_settings, "clicked", G_CALLBACK(on_settings_clicked), ui);
+  g_signal_connect(ui->btn_start_split, "clicked", G_CALLBACK(on_start_split_clicked), ui);
+  g_signal_connect(ui->btn_pause, "clicked", G_CALLBACK(on_pause_clicked), ui);
+  g_signal_connect(ui->btn_reset, "clicked", G_CALLBACK(on_reset_clicked), ui);
 
   gtk_box_append(GTK_BOX(row), GTK_WIDGET(ui->btn_settings));
   gtk_box_append(GTK_BOX(row), GTK_WIDGET(ui->btn_start_split));
@@ -525,11 +513,6 @@ static void ui_build(Ui *ui) {
   gtk_box_append(GTK_BOX(row), GTK_WIDGET(ui->btn_reset));
   gtk_box_append(GTK_BOX(root), row);
 }
-
-/* --- proper C callbacks for the 3 timer buttons --- */
-static void on_start_split_clicked(GtkButton *btn, gpointer user_data) { (void)btn; ls_call_void((Ui*)user_data, "StartOrSplit"); }
-static void on_pause_clicked(GtkButton *btn, gpointer user_data) { (void)btn; ls_call_void((Ui*)user_data, "TogglePause"); }
-static void on_reset_clicked(GtkButton *btn, gpointer user_data) { (void)btn; ls_call_void((Ui*)user_data, "Reset"); }
 
 /* ---------------- activate ---------------- */
 
@@ -540,14 +523,6 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
   ui->settings = ui_settings_load();
 
   ui_build(ui);
-
-  // Replace the invalid lambda signals with proper callbacks
-  g_signal_handlers_disconnect_by_func(ui->btn_start_split, NULL, ui);
-  g_signal_handlers_disconnect_by_func(ui->btn_pause, NULL, ui);
-  g_signal_handlers_disconnect_by_func(ui->btn_reset, NULL, ui);
-  g_signal_connect(ui->btn_start_split, "clicked", G_CALLBACK(on_start_split_clicked), ui);
-  g_signal_connect(ui->btn_pause, "clicked", G_CALLBACK(on_pause_clicked), ui);
-  g_signal_connect(ui->btn_reset, "clicked", G_CALLBACK(on_reset_clicked), ui);
 
   // Connect to daemon
   GError *err = NULL;
@@ -583,8 +558,9 @@ int main(int argc, char **argv) {
 
   if (ui.tick_id) g_source_remove(ui.tick_id);
   if (ui.proxy_ls) g_object_unref(ui.proxy_ls);
-  ui_settings_free_fields(&ui.settings);
 
+  ui_settings_free_fields(&ui.settings);
   g_object_unref(app);
+
   return status;
 }
