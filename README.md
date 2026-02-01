@@ -3,7 +3,7 @@
 LiveSpiff is a lightweight, Wayland-first speedrun timer for Linux.
 
 It is designed specifically for modern Wayland desktops (KDE Plasma, GNOME, wlroots),
-without relying on X11 hacks.
+without relying on X11.
 
 ## Features
 
