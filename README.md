@@ -1,10 +1,4 @@
-Alles gut 😄 verstanden — **wirklich alles in EINER einzigen README-Datei**, nichts ausgelagert, nichts referenziert.
-Hier ist **die finale, vollständige README.md als eine Datei**.
-👉 **Genau so speichern als:** `README.md`
 
----
-
-```md
 # LiveSpiff
 
 LiveSpiff is a lightweight, Wayland-first speedrun timer for Linux, primarily targeting KDE Plasma.
