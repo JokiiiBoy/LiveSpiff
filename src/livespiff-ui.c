@@ -5,11 +5,10 @@
 // - Shows time/state/splits
 // - Edit custom splits (names) and apply them (writes run JSON + calls LoadRun on daemon)
 // - Hotkey setup helper for KDE Wayland (global hotkeys via KDE Global Shortcuts calling qdbus6)
-// - Window selector removed here to keep it stable (can be re-added later)
 //
 // Notes:
-// - On Wayland you generally cannot enforce "always on top" via GTK4.
-//   Use KDE Window Rules to force "Keep Above Others" if you need overlay behavior.
+// - Wayland: global hotkeys should be set in KDE shortcuts.
+// - Wayland: always-on-top cannot be enforced reliably by GTK4.
 
 #include <gtk/gtk.h>
 #include <gio/gio.h>
@@ -90,7 +89,6 @@ static GPtrArray* splits_load(void) {
     g_strfreev(arr);
   }
 
-  // default
   if (splits->len == 0) {
     g_ptr_array_add(splits, g_strdup("Split 1"));
     g_ptr_array_add(splits, g_strdup("Split 2"));
@@ -154,7 +152,6 @@ static void ensure_parent_dir_for_file(const char *file_path) {
   g_free(dir);
 }
 
-// Basic JSON string escape
 static char* json_escape(const char *s) {
   if (!s) return g_strdup("");
   GString *g = g_string_new(NULL);
@@ -169,11 +166,8 @@ static char* json_escape(const char *s) {
       case '\r': g_string_append(g, "\\r"); break;
       case '\t': g_string_append(g, "\\t"); break;
       default:
-        if (c < 0x20) {
-          g_string_append_printf(g, "\\u%04x", (unsigned)c);
-        } else {
-          g_string_append_c(g, (char)c);
-        }
+        if (c < 0x20) g_string_append_printf(g, "\\u%04x", (unsigned)c);
+        else g_string_append_c(g, (char)c);
         break;
     }
   }
@@ -271,13 +265,8 @@ static gboolean ls_call_load_run(Ui *ui, const char *path, char **out_msg) {
   GError *err = NULL;
 
   GVariant *ret = g_dbus_proxy_call_sync(
-    ui->proxy_ls,
-    "LoadRun",
-    params,
-    G_DBUS_CALL_FLAGS_NONE,
-    2000,
-    NULL,
-    &err
+    ui->proxy_ls, "LoadRun", params,
+    G_DBUS_CALL_FLAGS_NONE, 2000, NULL, &err
   );
 
   if (!ret) {
@@ -323,7 +312,6 @@ static gboolean ui_tick(gpointer user_data) {
     return G_SOURCE_CONTINUE;
   }
 
-  // elapsed
   gint64 ms = 0;
   if (ls_call_i64(ui, "ElapsedMs", &ms)) {
     char *t = format_time_ms(ms);
@@ -333,7 +321,6 @@ static gboolean ui_tick(gpointer user_data) {
     gtk_label_set_text(ui->time_label, "--:--:--.---");
   }
 
-  // state
   char *state = NULL;
   if (ls_call_str(ui, "State", &state)) {
     gtk_label_set_text(ui->state_label, state);
@@ -342,7 +329,6 @@ static gboolean ui_tick(gpointer user_data) {
     gtk_label_set_text(ui->state_label, "Unknown");
   }
 
-  // splits
   gint32 cur = 0, count = 0;
   if (ls_call_i32(ui, "CurrentSplit", &cur) && ls_call_i32(ui, "SplitCount", &count)) {
     char *s = g_strdup_printf("Split: %d / %d", (int)(cur + 1), (int)count);
@@ -375,10 +361,7 @@ typedef struct {
   GtkSpinButton *spin_refresh;
 } SettingsCtx;
 
-static void on_settings_destroy(GtkWidget *w, gpointer user_data) {
-  (void)w;
-  g_free(user_data);
-}
+static void on_settings_destroy(GtkWidget *w, gpointer user_data) { (void)w; g_free(user_data); }
 
 static void on_refresh_changed(GtkSpinButton *sb, gpointer user_data) {
   SettingsCtx *ctx = (SettingsCtx*)user_data;
@@ -388,7 +371,6 @@ static void on_refresh_changed(GtkSpinButton *sb, gpointer user_data) {
 
   ctx->ui->refresh_ms = v;
 
-  // store
   GKeyFile *kf = keyfile_load_or_new();
   g_key_file_set_integer(kf, "ui", "refresh_ms", v);
   keyfile_save(kf);
@@ -406,23 +388,19 @@ typedef struct {
   GtkLabel *status;
 } SplitsCtx;
 
-static void on_splits_destroy(GtkWidget *w, gpointer user_data) {
-  (void)w;
-  g_free(user_data);
-}
+static void on_splits_destroy(GtkWidget *w, gpointer user_data) { (void)w; g_free(user_data); }
 
 static GtkWidget* make_split_row(const char *name) {
   GtkWidget *row = gtk_list_box_row_new();
   GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
 
   GtkWidget *entry = gtk_entry_new();
-  gtk_entry_set_text(GTK_ENTRY(entry), name ? name : "");
+  gtk_editable_set_text(GTK_EDITABLE(entry), name ? name : "");
   gtk_widget_set_hexpand(entry, TRUE);
 
   gtk_box_append(GTK_BOX(box), entry);
   gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), box);
 
-  // store pointer to entry on row for reading later
   g_object_set_data(G_OBJECT(row), "entry", entry);
 
   return row;
@@ -458,15 +436,12 @@ static GPtrArray* splits_from_list(GtkListBox *list) {
 
     GtkWidget *entry = (GtkWidget*)g_object_get_data(G_OBJECT(child), "entry");
     if (entry && GTK_IS_ENTRY(entry)) {
-      const char *t = gtk_entry_get_text(GTK_ENTRY(entry));
+      const char *t = gtk_editable_get_text(GTK_EDITABLE(entry));
       if (t && t[0]) g_ptr_array_add(arr, g_strdup(t));
     }
   }
 
-  if (arr->len == 0) {
-    g_ptr_array_add(arr, g_strdup("Split 1"));
-  }
-
+  if (arr->len == 0) g_ptr_array_add(arr, g_strdup("Split 1"));
   return arr;
 }
 
@@ -477,7 +452,6 @@ static void on_splits_apply_clicked(GtkButton *btn, gpointer user_data) {
   GPtrArray *spl = splits_from_list(ctx->list);
   splits_save(spl);
 
-  // write run json
   char *run_path = livespiff_default_run_path();
   char *err = NULL;
 
@@ -489,15 +463,11 @@ static void on_splits_apply_clicked(GtkButton *btn, gpointer user_data) {
     return;
   }
 
-  // tell daemon to load it (updates split_count)
   char *msg = NULL;
   gboolean ok = ls_call_load_run(ctx->ui, run_path, &msg);
 
-  if (ok) {
-    gtk_label_set_text(ctx->status, "Applied. Daemon loaded run file.");
-  } else {
-    gtk_label_set_text(ctx->status, msg && msg[0] ? msg : "Applied, but daemon failed to load run.");
-  }
+  if (ok) gtk_label_set_text(ctx->status, "Applied. Daemon loaded run file.");
+  else gtk_label_set_text(ctx->status, (msg && msg[0]) ? msg : "Applied, but daemon failed to load run.");
 
   g_free(msg);
   g_free(run_path);
@@ -531,7 +501,6 @@ static void open_splits_editor(Ui *ui) {
   gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(sc), GTK_WIDGET(list));
   gtk_list_box_set_selection_mode(list, GTK_SELECTION_SINGLE);
 
-  // load current splits
   GPtrArray *spl = splits_load();
   for (guint i = 0; i < spl->len; i++) {
     GtkWidget *row = make_split_row((const char*)g_ptr_array_index(spl, i));
@@ -580,31 +549,22 @@ typedef struct {
   GtkLabel *status;
 } HotkeysCtx;
 
-static void on_hotkeys_destroy(GtkWidget *w, gpointer user_data) {
-  (void)w;
-  g_free(user_data);
-}
+static void on_hotkeys_destroy(GtkWidget *w, gpointer user_data) { (void)w; g_free(user_data); }
 
-static const char* cmd_start(void) {
-  return "qdbus6 com.livespiff.LiveSpiff /com/livespiff/LiveSpiff com.livespiff.LiveSpiff.Control.StartOrSplit";
-}
-static const char* cmd_pause(void) {
-  return "qdbus6 com.livespiff.LiveSpiff /com/livespiff/LiveSpiff com.livespiff.LiveSpiff.Control.TogglePause";
-}
-static const char* cmd_reset(void) {
-  return "qdbus6 com.livespiff.LiveSpiff /com/livespiff/LiveSpiff com.livespiff.LiveSpiff.Control.Reset";
-}
+static const char* cmd_start(void) { return "qdbus6 com.livespiff.LiveSpiff /com/livespiff/LiveSpiff com.livespiff.LiveSpiff.Control.StartOrSplit"; }
+static const char* cmd_pause(void) { return "qdbus6 com.livespiff.LiveSpiff /com/livespiff/LiveSpiff com.livespiff.LiveSpiff.Control.TogglePause"; }
+static const char* cmd_reset(void) { return "qdbus6 com.livespiff.LiveSpiff /com/livespiff/LiveSpiff com.livespiff.LiveSpiff.Control.Reset"; }
 
 static void on_hotkeys_save_clicked(GtkButton *btn, gpointer user_data) {
   (void)btn;
   HotkeysCtx *ctx = (HotkeysCtx*)user_data;
 
-  const char *s = gtk_entry_get_text(ctx->e_start);
-  const char *p = gtk_entry_get_text(ctx->e_pause);
-  const char *r = gtk_entry_get_text(ctx->e_reset);
+  const char *s = gtk_editable_get_text(GTK_EDITABLE(ctx->e_start));
+  const char *p = gtk_editable_get_text(GTK_EDITABLE(ctx->e_pause));
+  const char *r = gtk_editable_get_text(GTK_EDITABLE(ctx->e_reset));
 
   hotkeys_save(s, p, r);
-  gtk_label_set_text(ctx->status, "Saved. Now bind the commands in KDE: System Settings → Shortcuts → Custom Shortcuts.");
+  gtk_label_set_text(ctx->status, "Saved. Bind commands in KDE: System Settings → Shortcuts → Custom Shortcuts.");
 }
 
 static void open_hotkeys_window(Ui *ui) {
@@ -612,7 +572,7 @@ static void open_hotkeys_window(Ui *ui) {
   gtk_window_set_title(dlg, "Hotkeys");
   gtk_window_set_transient_for(dlg, ui->win);
   gtk_window_set_modal(dlg, TRUE);
-  gtk_window_set_default_size(dlg, 700, 360);
+  gtk_window_set_default_size(dlg, 720, 360);
 
   GtkWidget *root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
   gtk_widget_set_margin_top(root, 12);
@@ -632,43 +592,39 @@ static void open_hotkeys_window(Ui *ui) {
   char *hs = NULL, *hp = NULL, *hr = NULL;
   hotkeys_load(&hs, &hp, &hr);
 
-  // grid-like layout using boxes
   GtkWidget *grid = gtk_grid_new();
   gtk_grid_set_row_spacing(GTK_GRID(grid), 8);
   gtk_grid_set_column_spacing(GTK_GRID(grid), 8);
   gtk_box_append(GTK_BOX(root), grid);
 
-  // Row 1: Start/Split
   gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Start / Split key (label):"), 0, 0, 1, 1);
   GtkWidget *e_start = gtk_entry_new();
-  gtk_entry_set_text(GTK_ENTRY(e_start), hs);
+  gtk_editable_set_text(GTK_EDITABLE(e_start), hs);
   gtk_grid_attach(GTK_GRID(grid), e_start, 1, 0, 1, 1);
 
   GtkWidget *c_start = gtk_entry_new();
   gtk_editable_set_editable(GTK_EDITABLE(c_start), FALSE);
-  gtk_entry_set_text(GTK_ENTRY(c_start), cmd_start());
+  gtk_editable_set_text(GTK_EDITABLE(c_start), cmd_start());
   gtk_grid_attach(GTK_GRID(grid), c_start, 2, 0, 1, 1);
 
-  // Row 2: Pause
   gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Pause / Resume key (label):"), 0, 1, 1, 1);
   GtkWidget *e_pause = gtk_entry_new();
-  gtk_entry_set_text(GTK_ENTRY(e_pause), hp);
+  gtk_editable_set_text(GTK_EDITABLE(e_pause), hp);
   gtk_grid_attach(GTK_GRID(grid), e_pause, 1, 1, 1, 1);
 
   GtkWidget *c_pause = gtk_entry_new();
   gtk_editable_set_editable(GTK_EDITABLE(c_pause), FALSE);
-  gtk_entry_set_text(GTK_ENTRY(c_pause), cmd_pause());
+  gtk_editable_set_text(GTK_EDITABLE(c_pause), cmd_pause());
   gtk_grid_attach(GTK_GRID(grid), c_pause, 2, 1, 1, 1);
 
-  // Row 3: Reset
   gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Reset key (label):"), 0, 2, 1, 1);
   GtkWidget *e_reset = gtk_entry_new();
-  gtk_entry_set_text(GTK_ENTRY(e_reset), hr);
+  gtk_editable_set_text(GTK_EDITABLE(e_reset), hr);
   gtk_grid_attach(GTK_GRID(grid), e_reset, 1, 2, 1, 1);
 
   GtkWidget *c_reset = gtk_entry_new();
   gtk_editable_set_editable(GTK_EDITABLE(c_reset), FALSE);
-  gtk_entry_set_text(GTK_ENTRY(c_reset), cmd_reset());
+  gtk_editable_set_text(GTK_EDITABLE(c_reset), cmd_reset());
   gtk_grid_attach(GTK_GRID(grid), c_reset, 2, 2, 1, 1);
 
   g_free(hs); g_free(hp); g_free(hr);
@@ -747,9 +703,8 @@ static void on_hotkeys_clicked(GtkButton *btn, gpointer user_data) { (void)btn; 
 static void ui_build(Ui *ui) {
   ui->win = GTK_WINDOW(gtk_application_window_new(ui->app));
   gtk_window_set_title(ui->win, "LiveSpiff");
-  gtk_window_set_default_size(ui->win, 560, 300);
+  gtk_window_set_default_size(ui->win, 560, 320);
 
-  // CSS
   GdkDisplay *disp = gdk_display_get_default();
   if (disp) {
     GtkCssProvider *css = gtk_css_provider_new();
@@ -788,7 +743,6 @@ static void ui_build(Ui *ui) {
   gtk_box_append(GTK_BOX(meta), GTK_WIDGET(ui->split_label));
   gtk_box_append(GTK_BOX(root), meta);
 
-  // top utility buttons
   GtkWidget *tools = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
   gtk_widget_set_halign(tools, GTK_ALIGN_CENTER);
   gtk_box_append(GTK_BOX(root), tools);
@@ -805,7 +759,6 @@ static void ui_build(Ui *ui) {
   g_signal_connect(ui->btn_splits,   "clicked", G_CALLBACK(on_splits_clicked), ui);
   g_signal_connect(ui->btn_hotkeys,  "clicked", G_CALLBACK(on_hotkeys_clicked), ui);
 
-  // timer control buttons
   GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
   gtk_widget_set_halign(row, GTK_ALIGN_CENTER);
   gtk_box_append(GTK_BOX(root), row);
@@ -829,7 +782,6 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
   Ui *ui = (Ui*)user_data;
   ui->app = app;
 
-  // load refresh interval from ini
   ui->refresh_ms = 50;
   {
     GKeyFile *kf = keyfile_load_or_new();
@@ -843,7 +795,6 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
 
   ui_build(ui);
 
-  // Connect to daemon
   GError *err = NULL;
   ui->proxy_ls = g_dbus_proxy_new_for_bus_sync(
     G_BUS_TYPE_SESSION,
@@ -861,7 +812,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     if (err) g_error_free(err);
   }
 
-  // On startup, ensure daemon has our run file (if any splits were set)
+  // ensure daemon has a run file
   {
     GPtrArray *spl = splits_load();
     char *run_path = livespiff_default_run_path();
