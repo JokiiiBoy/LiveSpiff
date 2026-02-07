@@ -33,8 +33,8 @@ segment_time[i] = split_time[i] - split_time[i - 1]
 ### Segment delta (vs PB) — WIP
 - Each segment shows a delta compared to the PB segment
 - **Delta convention:**
-- **Negative value = slower**
-- **Positive value = faster**
+- **Negative value = faster**
+- **Positive value = solwer**
 
 Example:
 ```
