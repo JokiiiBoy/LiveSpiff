@@ -37,7 +37,6 @@ segment_time[i] = split_time[i] - split_time[i - 1]
 - **Positive value = solwer**
 
 
-This means you were **2.50.231 seconds slower** on that segment.
 
 ---
 
