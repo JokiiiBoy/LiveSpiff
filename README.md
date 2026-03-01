@@ -26,7 +26,6 @@ It consists of a small D-Bus daemon (`livespiffd`) and a GTK4 frontend (`livespi
 - Segment time is calculated as:
 ```
 
-test
 
 segment_time[i] = split_time[i] - split_time[i - 1]
 
